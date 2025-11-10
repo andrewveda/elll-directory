@@ -19,6 +19,26 @@
   h1 { font-family: 'Playfair Display', serif; font-size: 2.2em; margin: 5px 0; color: #FFD700; text-align: center; }
   h2 { font-family: 'Merriweather', serif; font-size: 1.1em; margin: 3px 0 10px; color: #D4AF37; font-style: italic; text-align: center; }
   .subheading { font-size: 0.9em; color: #C9B037; margin-bottom: 15px; text-align: center; }
+  #inputContainer { display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }
+  input, button {
+    padding: 8px 12px;
+    margin: 4px;
+    border-radius: 6px;
+    border: 1px solid #D4AF37;
+    font-size: 14px;
+    font-family: 'Merriweather', serif;
+    transition: all 0.3s ease;
+  }
+  input { width: 180px; background: #2B2B44; color: #EDEDED; }
+  input:focus { outline: none; border-color: #FFD700; }
+  button {
+    background: #4B3E8C;
+    color: #FFD700;
+    cursor: pointer;
+    font-weight: bold;
+    border: 1px solid #D4AF37;
+  }
+  button:hover { background: #3C2F70; transform: translateY(-2px); }
   #directoryContainer {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -59,6 +79,11 @@
 
 <div class="subheading">English Language Learning Laboratory<br>Virtual Record</div>
 
+<div id="inputContainer">
+  <input type="text" id="nameInput" placeholder="Enter Your Name">
+  <button onclick="fetchDirectory()">Show Records</button>
+</div>
+
 <div id="loadingQuote"></div>
 <div id="userName"></div>
 <div id="progress"></div>
@@ -71,7 +96,7 @@
 
 <script>
 const quote = "Fetching your ELLL progress... Please wait 📜🎓";
-const sheetURL = "https://script.google.com/macros/s/AKfycbzPmoVR2sfZFgrh7YGxag018JF3HtIkDq3AG65Tt_psWgWLGvbERINZw7lP9wuupbVd/exec";
+const sheetURL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSSY6GoSKJV0QtEE8eA4ALdmOEMwE_QiXuF5JAAEpLbP8bisUYKv_iPVXpOXHP6ytfOHf7wtoR-8mVG/pub?gid=1498500064&single=true&output=csv";
 
 const activityNames = [
   "SWOC","Phonics","Listening","Something Close to My Heart",
@@ -101,34 +126,114 @@ function typeWriter(text, element, callback=null){
     if(i>=text.length){ clearInterval(interval); if(callback) callback(); }
   },25);
 }
-
 async function fetchDirectory(){
-  const name="Guest";
+  const nameInput = document.getElementById('nameInput').value.trim();
+  if(!nameInput) return alert("Please enter your name!");
+  document.getElementById('inputContainer').style.display='none';
   const quoteEl=document.getElementById('loadingQuote');
   typeWriter(quote, quoteEl);
 
-  // Show buttons immediately
-  renderDirectory({Name:name,Challenges:[]});
+  try {
+    // Try to use cached parsed data first
+    let data = null;
+    let index = null;
+    if (sessionStorage.getItem("elllData") && sessionStorage.getItem("elllIndex")) {
+      data = JSON.parse(sessionStorage.getItem("elllData"));
+      index = JSON.parse(sessionStorage.getItem("elllIndex"));
+      console.info("Loaded parsed data & index from sessionStorage");
+    } else {
+      const res = await fetch(sheetURL);
+      const text = await res.text();
 
-  try{
-    const res=await fetch(sheetURL);
-    const data=await res.json();
-    const user=data.find(u=>u.Name.toUpperCase()===name.toUpperCase());
-    if(!user){
-      quoteEl.textContent="Showing default records.";
-      document.getElementById('userName').textContent=name.toUpperCase();
+      // Remove BOM if present
+      const cleanText = text.replace(/^\uFEFF/, "");
+
+      // Basic robust CSV parse for your format
+      // This regex splits CSV into fields respecting quoted fields
+      const lines = cleanText.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length === 0) throw new Error("CSV empty");
+
+      const parseLine = (line) => {
+        const re = /("([^"]*(?:""[^"]*)*)"|[^,]+)/g;
+        const fields = [];
+        let m;
+        while ((m = re.exec(line)) !== null) {
+          let v = m[1];
+          // remove surrounding quotes & unescape double quotes inside quoted fields
+          if (v.startsWith('"') && v.endsWith('"')) {
+            v = v.slice(1, -1).replace(/""/g, '"');
+          }
+          fields.push(v.trim());
+        }
+        return fields;
+      };
+
+      const headers = parseLine(lines[0]).map(h => h.replace(/^\uFEFF/g, "").trim());
+      const rows = lines.slice(1);
+      data = rows.map(line => {
+        const cols = parseLine(line);
+        const obj = {};
+        headers.forEach((h, i) => obj[h.trim()] = (cols[i] || "").trim());
+        return obj;
+      });
+
+      // Build index: NAME_IN_UPPERCASE => object
+      index = {};
+      data.forEach(u => {
+        const key = (u.Name || "").toString().trim().toUpperCase();
+        if (key) {
+          index[key] = u;
+        }
+      });
+
+      sessionStorage.setItem("elllData", JSON.stringify(data));
+      sessionStorage.setItem("elllIndex", JSON.stringify(index));
+      console.info("Parsed CSV and saved to sessionStorage");
+    }
+
+    // Normalise the lookup name
+    const lookupName = nameInput.toUpperCase();
+
+    // Debug info
+    console.info("Looking up name:", lookupName);
+    if (!index[lookupName]) {
+      console.warn("Name not found in index. Nearby keys (first 10):", Object.keys(index).slice(0,10));
+      // Show fallback UI but also give nice info to user
+      quoteEl.textContent="Name not found — showing default records.";
+      document.getElementById('userName').textContent=nameInput.toUpperCase();
+      renderDirectory({Name:nameInput,Challenges:[]});
+      currentUserData={Name:nameInput,Challenges:[]};
       return;
     }
+
+    const user = index[lookupName];
+
+    // Normalize Challenges into an array cleaned of extra whitespace
+    let completed;
+    if (Array.isArray(user.Challenges)) {
+      completed = user.Challenges.map(s => s.toString().trim());
+    } else {
+      // support a few variants of column name capitalization
+      const raw = user.Challenges || user["Challenges"] || user["challenge"] || "";
+      completed = raw.toString().split(",").map(s => s.trim()).filter(Boolean);
+    }
+
+    // Debug: show first few completed items
+    console.info("User found:", user.Name, "first 10 challenge tokens:", completed.slice(0,10));
+
+    // set current user and render
     document.getElementById('userName').textContent=user.Name.toUpperCase();
-    renderDirectory(user);
-    currentUserData=user;
+    // Ensure we pass a user object with Challenges as array to renderDirectory
+    const userForRender = Object.assign({}, user, { Challenges: completed });
+    renderDirectory(userForRender);
+    currentUserData = userForRender;
     quoteEl.textContent="";
-  }catch(err){
-    console.error(err);
-    document.getElementById('loadingQuote').textContent="Error fetching data — showing offline view.";
+
+  } catch(err){
+    console.error("Error in fetchDirectory:", err);
+    document.getElementById('loadingQuote').textContent="Error fetching data!";
   }
 }
-
 function renderDirectory(user){
   const container=document.getElementById('directoryContainer');
   container.innerHTML="";
@@ -158,7 +263,110 @@ function renderDirectory(user){
   document.getElementById('progress').textContent=`Gems: ${doneCount}/9 collected ${doneCount===9?"📜":""}`;
 }
 
-window.addEventListener('DOMContentLoaded', fetchDirectory);
+document.getElementById('generatePdfBtn').addEventListener('click', async () => {
+  if (!currentUserData) return alert("Please fetch a student first!");
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ format: 'a4', unit: 'mm' });
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+
+  // Background
+  doc.setFillColor(27,27,47);
+  doc.rect(0,0,pw,ph,'F');
+
+  // Header
+  doc.setFont('times','bold'); doc.setFontSize(16); doc.setTextColor(255,215,0);
+  doc.text('SRM Valliammai Engineering College (Autonomous)', pw/2, 20, {align:'center'});
+  doc.setFont('times','italic'); doc.setFontSize(14);
+  doc.text('Department of English', pw/2, 28, {align:'center'});
+  doc.setFont('times','italic'); doc.setFontSize(12); doc.setTextColor(230,230,230);
+  doc.text('English Language Learning Laboratory Virtual Record', pw/2, 36, {align:'center'});
+  doc.text('2025-2026', pw/2, 42, {align:'center'});
+  doc.text('Semester - I', pw/2, 48, {align:'center'});
+
+  // Student info
+  const xKey=15, xValue=70;
+  let yPos = 55;
+  const headerMap = {
+    "Name":"Student Name","Rank":"Rank","Score (Correct–Wrong)":"Score",
+    "TotalCorrect":"Total Correct Answers","TotalWrong":"Total Wrong Answers",
+    "Total Time (s)":"Time Spent (s)","Quests":"Total Quests Completed",
+    "LastTest":"Last Test Date"
+  };
+  const keysOrder = ["Name","Rank","Score (Correct–Wrong)"];
+  keysOrder.forEach(key => {
+    if(currentUserData[key] !== undefined){
+      const displayKey = headerMap[key];
+      doc.setFont('times','normal'); doc.setFontSize(11); doc.setTextColor(230,230,230);
+      doc.text(`${displayKey}:`, xKey, yPos); doc.text(`${currentUserData[key]}`, xValue, yPos);
+      yPos += 6;
+    }
+  });
+
+  // Capture PNG
+  const container = document.getElementById('directoryContainer');
+  container.style.filter = 'brightness(0.7)';
+  const canvas = await html2canvas(container, { backgroundColor:'#1B1B2F', scale:2 });
+  const imgData = canvas.toDataURL('image/png');
+  container.style.filter = '';
+
+  // Calculate dynamic space for PNG
+  const footerHeight = 10;
+  const metricsHeight = 6*5; // 5 metrics
+  const declarationHeight = 8*2 + 10 + 6*2; // 2 lines + signature + date
+  const availableHeight = ph - yPos - metricsHeight - declarationHeight - footerHeight - 5;
+
+  const imgProps = doc.getImageProperties(imgData);
+  let pdfWidth = pw * 0.8;
+  let pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+
+  // Scale to fit available height while preserving aspect ratio
+  if(pdfHeight > availableHeight){
+    pdfHeight = availableHeight;
+    pdfWidth = (imgProps.width * pdfHeight) / imgProps.height;
+  }
+
+  const imgX = (pw - pdfWidth)/2;
+  const imgY = yPos;
+  doc.addImage(imgData, 'PNG', imgX, imgY, pdfWidth, pdfHeight);
+
+  // Metrics below PNG
+  yPos = imgY + pdfHeight + 5;
+  const metricsOrder = ["TotalCorrect","TotalWrong","Total Time (s)","Quests","LastTest"];
+  metricsOrder.forEach(key => {
+    if(currentUserData[key] !== undefined){
+      const displayKey = headerMap[key];
+      doc.text(`${displayKey}:`, xKey, yPos); doc.text(`${currentUserData[key]}`, xValue, yPos);
+      yPos += 6;
+    }
+  });
+
+  // Declaration
+  yPos += 10;
+  doc.setFont('times','italic'); doc.setFontSize(10);
+  const declarationLines = [
+    "I, __________________________ , proudly affirm that this record is a vibrant and honest monument to my personal odyssey in mastering the English language. I personally confirm that the recorded time spent in every activity (including listening, speaking, writing, reading, and critical thinking), every answer, and every reflection contained within is a direct testament to my own dedicated effort."
+  ];
+  declarationLines.forEach(line => {
+    doc.text(line, 15, yPos, { maxWidth: pw-30 });
+    yPos += 8;
+  });
+
+  // Signature & Date
+  yPos += 8;
+  doc.setFont('times','normal');
+  doc.text("Signature of the student: __________________________", 15, yPos);
+  yPos += 6;
+  doc.text("Date: __________________________", 15, yPos);
+
+  // Footer
+  doc.setFont('times','italic'); doc.setFontSize(10); doc.setTextColor(180,180,180);
+  doc.text('Generated from the ELLL Virtual Record | SRM VEC', pw/2, ph-10, {align:'center'});
+
+  doc.save(`ELLL_Report_${currentUserData.Name}.pdf`);
+});
+
+
 </script>
 </body>
 </html>
